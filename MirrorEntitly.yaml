@@ -7,8 +7,52 @@ Parameters:
     Type: String
     Description: Default Site folder to use. Include the leading slash!
     Default: /electrical
+  
+  HostedZoneId:
+    Type: AWS::Route53::HostedZone::Id
+    Description: "Hosted zone for the target domain. Note: A www record will be created automatically"
+  
+  DomainName:
+    Type: String
+    Description: Full DNS Name for your site
 
 Resources:
+  DNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "www.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt distro.DomainName
+        EvaluateTargetHealth: false
+        HostedZoneId: Z2FDTNDATAQYW2 # See https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-route53-aliastarget.html#cfn-route53-aliastarget-hostedzoneid
+
+  WWWDNSRecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt distro.DomainName
+        EvaluateTargetHealth: false
+        HostedZoneId: Z2FDTNDATAQYW2 # See https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/aws-properties-route53-aliastarget.html#cfn-route53-aliastarget-hostedzoneid
+
+  SSLCert:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      SubjectAlternativeNames:
+        - !Sub "www.${DomainName}"
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+        - DomainName: !Sub "www.${DomainName}"
+          HostedZoneId: !Ref HostedZoneId
+
+
   bucketpolicy:
     Type: AWS::S3::BucketPolicy
     Properties: 
@@ -71,6 +115,14 @@ Resources:
           CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
         DefaultRootObject: index.html
         Enabled: true
+        Aliases:
+          - !Ref DomainName
+          - !Sub "www.${DomainName}"
+        ViewerCertificate:
+          # CloudFrontDefaultCertificate: false
+          AcmCertificateArn: !Ref SSLCert
+          MinimumProtocolVersion: TLSv1
+          SslSupportMethod: sni-only
         Origins:
           - DomainName: !Sub "${bucket}.s3.${AWS::Region}.amazonaws.com"
             Id: bucketbackend
@@ -194,3 +246,10 @@ Outputs:
   DistroURL:
     Value: !GetAtt distro.DomainName
     Description: DNS Name of the CloudFront Distribution
+  DNSName:
+    Value: !Ref DomainName
+    Export:
+      Name: !Sub "${AWS::StackName}-DNSName"
+  APIEndpoint:
+    Value: !GetAtt api.ApiEndpoint
+    Description: Endpoint for the control api
