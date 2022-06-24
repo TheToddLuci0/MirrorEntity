@@ -9,6 +9,9 @@ _For those wondering what happened to our brave hero, he was forced to display h
 ## How it works
 Mirror Entity has two main components: a cloudfront distro that serves your website(s), and a control plane that changes what the distro points at. Site content is housed in an S3 bucket. 
 
+# Useage
+Simply deploy the [template](/MirrorEntitly.yaml) into your AWS account using CFN. You can then upload your "sites" into the S3 bucket it creates. The [postman collection](/Mirror_Entity.postman_collection.json) contains sample requests to change the site that is presented at the domain. Simply set the variables at the collection level and you're good to go.
+
 
 # FAQ
 
