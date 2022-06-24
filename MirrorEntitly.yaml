@@ -1,0 +1,196 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Deploy a Mirror Entity system
+
+Parameters:
+  DefaultSite:
+    Type: String
+    Description: Default Site folder to use. Include the leading slash!
+    Default: /electrical
+
+Resources:
+  bucketpolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties: 
+      Bucket: !Ref bucket
+      PolicyDocument:
+        Version: '2012-10-17'
+        Id: PolicyForCloudFrontPrivateContent
+        Statement:
+        - Sid: '1'
+          Effect: Allow
+          Principal:
+            AWS: !Sub "arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${distid}"
+          Action: s3:GetObject
+          Resource: !Sub "arn:aws:s3:::${bucket}/*"
+
+
+  bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "mirror-entity-${AWS::AccountId}-${AWS::StackName}"
+
+  distid:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties: 
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: Access for Mirror Entity
+
+  api:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: Mirror Entity API
+      ProtocolType: HTTP
+
+  ApiStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref api
+      StageName: Live
+      Description: Live Stage
+      AutoDeploy: true
+  
+  ApiRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref api
+      RouteKey: "$default"
+      AuthorizationType: AWS_IAM
+      Target: !Join
+        - /
+        - - integrations
+          - !Ref Integration
+
+  distro:
+    Type: AWS::CloudFront::Distribution
+    Properties: 
+      DistributionConfig: 
+        DefaultCacheBehavior:
+          TargetOriginId: bucketbackend
+          ViewerProtocolPolicy: redirect-to-https
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad
+        DefaultRootObject: index.html
+        Enabled: true
+        Origins:
+          - DomainName: !Sub "${bucket}.s3.${AWS::Region}.amazonaws.com"
+            Id: bucketbackend
+            OriginPath: !Ref DefaultSite
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub "origin-access-identity/cloudfront/${distid}"
+
+  lambdarole:
+    Type: AWS::IAM::Role
+    Properties:  
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+        - Effect: Allow
+          Principal:
+            Service: lambda.amazonaws.com
+          Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      Policies:
+        - PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+            - Sid: VisualEditor0
+              Effect: Allow
+              Action:
+              - cloudfront:GetDistribution
+              - cloudfront:UpdateDistribution
+              - cloudfront:GetDistributionConfig
+              Resource: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${distro}"
+            - Sid: VisualEditor1
+              Effect: Allow
+              Action: cloudfront:ListDistributions
+              Resource: "*"
+            - Sid: VisualEditor2
+              Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*"
+            - Sid: VisualEditor3
+              Effect: Allow
+              Action:
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/${AWS::StackName}-lambda:*"
+    
+          PolicyName: !Sub "Default-execution-${AWS::StackName}"
+
+  LambdaInvokePermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref controllambda
+      Action: "lambda:InvokeFunction"
+      Principal: apigateway.amazonaws.com
+
+  Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref api
+      Description: Lambda proxy integration
+      IntegrationType: AWS_PROXY
+      IntegrationMethod: POST
+      PayloadFormatVersion: "2.0"
+      IntegrationUri: !Sub 'arn:${AWS::Partition}:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${controllambda.Arn}/invocations'
+
+  controllambda:
+    Type: AWS::Lambda::Function
+    Properties: 
+      FunctionName: !Sub "${AWS::StackName}-lambda"
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Role: !GetAtt lambdarole.Arn
+      Code:
+        ZipFile: !Sub | 
+          import json
+          import boto3
+
+          BUCKET_NAME="${bucket}"
+          DIST_ID = "${distro}"
+
+
+          def get(event):
+              s3 = boto3.resource('s3')
+              res = []
+              # Returns all items in the "root" of the bu
+              for i in s3.Bucket(BUCKET_NAME).objects.filter(Delimiter='/'):
+                  res.append(i.key)
+              return res
+
+
+          def post(event):
+              try:
+                  b = json.loads(event['body'])
+                  cft = boto3.client('cloudfront')
+                  conf = cft.get_distribution_config(Id=DIST_ID)
+                  conf['DistributionConfig']['Origins']['Items'][0]['OriginPath'] = '/{}'.format(b['site'])
+                  cft.update_distribution(DistributionConfig=conf['DistributionConfig'], Id=DIST_ID, IfMatch=conf['ETag'])
+                  return b, 200
+              except Exception as e:
+                  return str(e), 500
+
+
+          def lambda_handler(event, context):
+              STATUS_CODE = 200
+              # TODO implement
+              method = event["requestContext"]['http']['method']
+              if method == 'POST':
+                  res, STATUS_CODE = post(event)
+              elif method == 'GET':
+                  res = get(event)
+              else:
+                  res = "Oh lawd, we broke"
+                  STATUS_CODE = 599
+                  
+              return {
+                  'statusCode': STATUS_CODE,
+                  'body': json.dumps(res)
+              }
+
+Outputs:
+  DistroURL:
+    Value: !GetAtt distro.DomainName
+    Description: DNS Name of the CloudFront Distribution
